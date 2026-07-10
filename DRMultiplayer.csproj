@@ -1,0 +1,83 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <AssemblyName>DRMultiplayer</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <!-- Unity/BepInEx Mono assemblies aren't deterministic refs; silence noise -->
+    <NoWarn>CS0626;CS0649;CS0436</NoWarn>
+
+    <!-- Adjust if you move the game -->
+    <GameDir>$(HOME)/.local/share/Steam/steamapps/common/Dorfromantik</GameDir>
+    <Managed>$(GameDir)/Dorfromantik_Data/Managed</Managed>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- BepInEx 5 (Mono) from the BepInEx feed (see NuGet.config); brings
+         BepInEx.dll + 0Harmony.dll as compile refs -->
+    <PackageReference Include="BepInEx.Core" Version="5.4.21" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Reference the game's own assemblies straight from the install so versions
+         match exactly. Private=false => don't copy them into our output.
+         Newtonsoft.Json is the exception: the game's shipped copy may be stripped
+         (Unity managed stripping) and lack JsonConvert, so we compile against the
+         NuGet package instead (ExcludeAssets=runtime => compile-only, nothing
+         extra copied into the deployed plugin). The full DLL is provided at
+         runtime by the install scripts via the unstripped-libs override. -->
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(Managed)/Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" ExcludeAssets="runtime" />
+    <Reference Include="UnityEngine">
+      <HintPath>$(Managed)/UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(Managed)/UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>$(Managed)/UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>$(Managed)/UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.PhysicsModule">
+      <HintPath>$(Managed)/UnityEngine.PhysicsModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="com.rlabrecque.steamworks.net">
+      <HintPath>$(Managed)/com.rlabrecque.steamworks.net.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- TextMeshPro: the quest-marker target number is a world-space TMPro.TextMeshPro
+         (QuestElementIcon.countLabel). Phase 2 recolors it to the ghost tint while keeping
+         its SDF font material, so we need the compile-time type. DLL confirmed present in
+         the game's Managed folder. Private=false => not copied (shipped with the game). -->
+    <Reference Include="Unity.TextMeshPro">
+      <HintPath>$(Managed)/Unity.TextMeshPro.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- UnityEngine.UI: only needed so the TextMeshPro type hierarchy resolves at compile time
+         (TMP_Text's base MaskableGraphic lives here). We don't use UI types directly. -->
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(Managed)/UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- After build, drop the DLL straight into the BepInEx plugins folder -->
+  <Target Name="Deploy" AfterTargets="Build">
+    <Copy SourceFiles="$(TargetPath)"
+          DestinationFolder="$(GameDir)/BepInEx/plugins/DRMultiplayer"
+          SkipUnchangedFiles="false"
+          Condition="Exists('$(GameDir)/BepInEx')" />
+  </Target>
+
+</Project>
