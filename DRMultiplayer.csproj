@@ -13,6 +13,13 @@
     <Managed>$(GameDir)/Dorfromantik_Data/Managed</Managed>
   </PropertyGroup>
 
+  <!-- Release builds ship publicly: no pdb, and no local filesystem paths
+       baked into the assembly (pdb path, CallerFilePath). -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <DebugType>none</DebugType>
+    <PathMap>$(MSBuildProjectDirectory)=/DRMultiplayer</PathMap>
+  </PropertyGroup>
+
   <ItemGroup>
     <!-- BepInEx 5 (Mono) from the BepInEx feed (see NuGet.config); brings
          BepInEx.dll + 0Harmony.dll as compile refs -->
