@@ -59,9 +59,9 @@ cat > "$STAGING/INSTALL.txt" <<'EOF'
 DRMultiplayer for Dorfromantik - Windows install
 
 1. Extract this whole zip anywhere (e.g. your Downloads folder).
-2. Double-click install-windows.bat. It finds your Steam install of
+2. Double-click install-windows.bat. It finds your Steam or GOG install of
    Dorfromantik and sets up everything (BepInEx + the mod).
-3. Start the game, begin or continue a classic game, press F6 (or M).
+3. Start the game, begin or continue a Classic or Creative game, press F6 (or M).
 
 If Windows SmartScreen warns about the script, click "More info" ->
 "Run anyway". When you host a game, allow the firewall prompt or

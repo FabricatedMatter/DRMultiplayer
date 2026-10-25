@@ -27,7 +27,7 @@ namespace DRMultiplayer
 
         // Player name resolves lazily with this precedence:
         //   1. an explicit, non-blank name from config,
-        //   2. else the Steam persona name (once SteamManager.Initialized),
+        //   2. else the Steam persona name (once the game's SteamManager is up),
         //   3. else the OS username, 4. else "Player".
         // It's a property (not a field) so all existing call sites stay unchanged.
         internal static string PlayerName
@@ -57,11 +57,17 @@ namespace DRMultiplayer
         // The shipped Steamworks.NET is stripped: SteamFriends.GetPersonaName() is
         // gone, so we ask for our OWN persona name via GetFriendPersonaName(our id).
         // Any Steam call can throw if the client isn't ready, so wrap it all.
+        //
+        // Never touch SteamManager.Initialized itself: the GOG build ships an older
+        // SteamManager whose getter CREATES the manager on first access, and its Awake
+        // calls Application.Quit() when steam_api64.dll is missing (issue #1). Peek at
+        // the static instance instead — it only exists if the game made one itself.
         private static string TrySteamPersonaName()
         {
             try
             {
-                if (!SteamManager.Initialized) return null;
+                var instance = Traverse.Create(typeof(SteamManager)).Field("s_instance").GetValue<SteamManager>();
+                if (instance == null || !Traverse.Create(instance).Field("m_bInitialized").GetValue<bool>()) return null;
                 var name = Steamworks.SteamFriends.GetFriendPersonaName(Steamworks.SteamUser.GetSteamID());
                 return string.IsNullOrWhiteSpace(name) ? null : name.Trim();
             }

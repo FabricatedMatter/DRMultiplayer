@@ -1,7 +1,7 @@
 # install-windows.ps1 - one-stop BepInEx + DRMultiplayer installer for Windows.
 #
 # For players: no .NET SDK, no build step, nothing manual. The script
-#   1. finds your Dorfromantik install (Steam registry + library folders),
+#   1. finds your Dorfromantik install (Steam registry + library folders, GOG registry),
 #   2. installs the official BepInEx 5.4.23.5 (win_x64) loader,
 #   3. installs the full net_4_x unstripped Mono corlib (sha256-verified from
 #      this project's GitHub release) into unstripped_libs\ and points
@@ -72,7 +72,17 @@ function Find-GameDir {
             }
         }
     } catch { }
+    # GOG installs register themselves under GOG.com\Games\<id> with their install path.
+    foreach ($root in "HKLM:\SOFTWARE\WOW6432Node\GOG.com\Games", "HKLM:\SOFTWARE\GOG.com\Games") {
+        try {
+            Get-ChildItem $root -ErrorAction Stop | ForEach-Object {
+                $g = Get-ItemProperty $_.PSPath
+                if ($g.gameName -like "*Dorfromantik*" -and $g.path) { $candidates += $g.path }
+            }
+        } catch { }
+    }
     $candidates += "C:\Program Files (x86)\Steam\steamapps\common\Dorfromantik"
+    $candidates += "C:\Program Files (x86)\GOG Galaxy\Games\Dorfromantik"
     foreach ($c in $candidates) {
         if (Test-Path (Join-Path $c "Dorfromantik.exe")) { return $c }
     }
@@ -81,7 +91,7 @@ function Find-GameDir {
 
 if (-not $GameDir) { $GameDir = Find-GameDir }
 if (-not $GameDir) {
-    Warn "Could not find Dorfromantik in your Steam libraries."
+    Warn "Could not find Dorfromantik in your Steam or GOG libraries."
     $GameDir = Read-Host "  Enter the path to your Dorfromantik folder"
 }
 if (-not (Test-Path (Join-Path $GameDir "Dorfromantik.exe"))) {
