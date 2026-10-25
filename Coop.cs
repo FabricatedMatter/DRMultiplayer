@@ -36,6 +36,10 @@ namespace DRMultiplayer
         /// be instant so the game's auto-fit tween can't visually desync the mesh.</summary>
         internal static bool NetPlacing;
 
+        /// <summary>True while we delete tiles ourselves (host-ordered Creative deletes, world
+        /// rebuilds); lets TilePlacer.DestroyTile past the delete intercept.</summary>
+        internal static bool BypassDeleteIntercept;
+
         /// <summary>Gate for RewardSystem.GameOver — in coop the run only ends when BOTH
         /// players are out of tiles, coordinated by the host.</summary>
         internal static bool AllowGameOver;
@@ -100,6 +104,11 @@ namespace DRMultiplayer
 
         internal static GameModeId CurrentGameMode =>
             OverwritingSingleton<GameSession>.Instance ? OverwritingSingleton<GameSession>.Instance.GameMode.id : GameModeId.Undefined;
+
+        /// <summary>Creative: infinite stacks, no game over, a delete tool. Always Coop.</summary>
+        internal static bool IsCreative => CurrentGameMode == GameModeId.Creative;
+
+        internal static bool IsSupportedMode(GameModeId mode) => mode == GameModeId.Classic || mode == GameModeId.Creative;
 
         /// <summary>Non-initial tiles on the board — the shared world size.</summary>
         internal static int PlacedTileCount()
@@ -335,6 +344,33 @@ namespace DRMultiplayer
                 Traverse.Create(r.AutoSaver).Field("validSaveGame").SetValue(true);
         }
 
+        // ---------------- deleting placements (Creative) ----------------
+
+        /// <summary>Delete the placed tile at <paramref name="pos"/> on this machine. Like
+        /// ApplyConstructed, the hovering preview is lifted out of the world first and put back
+        /// afterwards. False when there is no deletable tile there (empty, preview, initial).</summary>
+        internal static bool DeleteAt(Vector2Int pos)
+        {
+            var r = Refs;
+            var tile = r?.World.GetTile(pos);
+            if (tile == null || tile.State != TileState.placed || tile.IsInitialTile) return false;
+
+            var prevSlot = r.Placer.CurrentTileSlot;
+            if (r.Placer.CurrentTile != null)
+                r.Placer.ShowPreviewTileAt(null);
+            BypassDeleteIntercept = true;
+            try { r.Placer.DestroyTile(tile); }
+            finally { BypassDeleteIntercept = false; }
+
+            if (prevSlot && r.World.GetTile(prevSlot.GridPos) == null && r.Placer.CurrentTile != null)
+                r.Placer.ShowPreviewTileAt(prevSlot);
+            r.Placer.UpdateTileSlotValidity();
+
+            if (Session.Role == SessionRole.Host && r.AutoSaver != null)
+                Traverse.Create(r.AutoSaver).Field("validSaveGame").SetValue(true);
+            return true;
+        }
+
         // ---------------- snapshots (join + desync recovery) ----------------
 
         internal static SnapshotDto BuildSnapshot()
@@ -397,11 +433,31 @@ namespace DRMultiplayer
         internal static void ResyncWorld(SnapshotDto snap)
         {
             var r = Refs;
-            foreach (var tile in r.World.GetAllPlacedTiles().Where(x => !x.IsInitialTile).ToList())
-                r.Placer.DestroyTile(tile);
+            ClearPlacedTiles();
             PlaceSnapshotTiles(snap);
             SetStats(snap);
             r.Placer.UpdateTileSlotValidity();
+        }
+
+        /// <summary>Wipe our board and rebuild it from the host exactly like a fresh join,
+        /// seeds included. Used after a Classic -> Creative switch, where the guest's freshly
+        /// loaded Creative world has nothing in common with the shared one.</summary>
+        internal static void RebuildWorld(SnapshotDto snap)
+        {
+            ClearPlacedTiles();
+            ApplySnapshotOnJoin(snap);
+        }
+
+        private static void ClearPlacedTiles()
+        {
+            var r = Refs;
+            BypassDeleteIntercept = true;
+            try
+            {
+                foreach (var tile in r.World.GetAllPlacedTiles().Where(x => !x.IsInitialTile).ToList())
+                    r.Placer.DestroyTile(tile);
+            }
+            finally { BypassDeleteIntercept = false; }
         }
 
         private static void PlaceSnapshotTiles(SnapshotDto snap)
@@ -786,7 +842,7 @@ namespace DRMultiplayer
         internal static void TriggerCoopGameOver()
         {
             var r = Refs;
-            if (r == null || r.Rewards.IsGameOver) return;
+            if (r == null || r.Rewards.IsGameOver || IsCreative) return;
             AllowGameOver = true;
             try { r.Rewards.GameOver(animate: true, setHighscore: false); }
             finally { AllowGameOver = false; }

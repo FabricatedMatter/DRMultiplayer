@@ -58,6 +58,20 @@ namespace DRMultiplayer
 
         internal static int ResyncCount { get; private set; }
 
+        // ---------------- Classic -> Creative switch ----------------
+        //
+        // "Continue in Creative" reloads the game scene. The session survives that: the sockets
+        // live on background threads, packets simply wait in NetHub.Events until the new world has
+        // loaded, and then the host re-sends the whole world (seeds included) to every guest.
+
+        private const float ModeSwitchTimeout = 60f;
+        private static float _modeSwitchStartedAt = -1f;   // < 0 = no switch in progress
+        private static bool _modeSwitchLeftScene;          // the old scene is gone; waiting for the new one
+
+        /// <summary>True while the scene reloads for a mode switch. Plugin.Update stops draining
+        /// packets meanwhile so nothing is applied to a half-loaded world.</summary>
+        internal static bool HoldingForModeSwitch => _modeSwitchStartedAt >= 0f && _modeSwitchLeftScene;
+
         // ---------------- Versus mode (Phase 4) ----------------
         //
         // Versus is turn-based: only ONE player (the "active" player) may place at a time, and each
@@ -196,7 +210,7 @@ namespace DRMultiplayer
                 int tiles = p.Self ? MyTiles : p.Tiles;
                 if (tiles != 0) return false;   // -1 (unknown) counts as "still has tiles"
             }
-            return true;
+            return !Coop.IsCreative;   // Creative stacks never run out
         }
 
         // ---------------- preconditions ----------------
@@ -204,7 +218,7 @@ namespace DRMultiplayer
         internal static string HostBlocker()
         {
             if (!Coop.InGame) return "not in a game";
-            if (Coop.CurrentGameMode != GameModeId.Classic) return "only classic mode is supported";
+            if (!Coop.IsSupportedMode(Coop.CurrentGameMode)) return "only Classic and Creative modes are supported";
             if (Coop.Refs.Input != null && Coop.Refs.Input.IsLoading) return "game is still loading";
             // Phase 3: hosting an in-progress / continued world is allowed — the game's classic save
             // already carries the shared board + the host's stack, and the mod's companion file
@@ -215,7 +229,7 @@ namespace DRMultiplayer
         internal static string JoinBlocker()
         {
             if (!Coop.InGame) return "not in a game";
-            if (Coop.CurrentGameMode != GameModeId.Classic) return "only classic mode is supported";
+            if (!Coop.IsSupportedMode(Coop.CurrentGameMode)) return "only Classic and Creative modes are supported";
             if (Coop.Refs.Input != null && Coop.Refs.Input.IsLoading) return "game is still loading";
             // Phase 3: you can join from ANY classic game now, not just a fresh one — your board is
             // wiped and rebuilt from the host's snapshot on Welcome. (Your own solo autosave is
@@ -255,7 +269,8 @@ namespace DRMultiplayer
             _versusScoreBaseline = Coop.Refs?.Rewards.Score ?? 0;
 
             LoadCompanion();                // continuing a saved game? restore the remembered roster + mode + scores
-            Info($"Hosting a {(Mode == GameModeKind.Versus ? "Versus" : "Coop")} game on port {port} — you can play now; friends can join anytime (up to {MaxGuests}).");
+            if (Coop.IsCreative) Mode = GameModeKind.Coop;   // no stacks to race in Creative
+            Info($"Hosting a {(Coop.IsCreative ? "Creative Coop" : Mode == GameModeKind.Versus ? "Versus" : "Coop")} game on port {port} — you can play now; friends can join anytime (up to {MaxGuests}).");
             if (Mode == GameModeKind.Versus) BroadcastTurn();
         }
 
@@ -284,6 +299,8 @@ namespace DRMultiplayer
             _savedRoster.Clear();
             Mode = GameModeKind.Coop;
             ContinuingSaved = false;
+            _modeSwitchStartedAt = -1f;
+            _modeSwitchLeftScene = false;
             Role = SessionRole.Off;
             State = SessionState.Idle;
             LocalPlayerId = 0;
@@ -433,6 +450,7 @@ namespace DRMultiplayer
                     switch (env.t)
                     {
                         case nameof(PlaceRequestPacket): OnPlaceRequest(gid, peer, Read<PlaceRequestPacket>(env)); break;
+                        case nameof(DeleteRequestPacket): OnDeleteRequest(gid, peer, Read<DeleteRequestPacket>(env)); break;
                         case nameof(StackCountPacket): OnGuestStackCount(gid, Read<StackCountPacket>(env)); break;
                         case nameof(SendTilesPacket): OnSendTilesToHost(Read<SendTilesPacket>(env)); break;
                         case nameof(PreviewPacket): OnGuestPreview(gid, Read<PreviewPacket>(env)); break;
@@ -449,6 +467,7 @@ namespace DRMultiplayer
                         case nameof(RefusePacket): OnRefuse(Read<RefusePacket>(env)); break;
                         case nameof(PlaceResultPacket): OnPlaceResult(Read<PlaceResultPacket>(env)); break;
                         case nameof(TilePlacedPacket): OnTilePlaced(Read<TilePlacedPacket>(env)); break;
+                        case nameof(TileDeletedPacket): OnTileDeleted(Read<TileDeletedPacket>(env)); break;
                         case nameof(RosterPacket): OnRoster(Read<RosterPacket>(env)); break;
                         case nameof(SendTilesPacket): OnTilesGifted(Read<SendTilesPacket>(env)); break;
                         case nameof(TurnPacket): OnTurn(Read<TurnPacket>(env)); break;
@@ -476,8 +495,8 @@ namespace DRMultiplayer
             string refuse = null;
             if (hello.protocol != ProtocolVersion.Current)
                 refuse = $"version mismatch (host {ProtocolVersion.Current}, guest {hello.protocol})";
-            else if ((GameModeId)hello.gameMode != GameModeId.Classic)
-                refuse = "guest must be in a classic game";
+            else if ((GameModeId)hello.gameMode != Coop.CurrentGameMode)
+                refuse = $"guest must be in a {(Coop.IsCreative ? "Creative" : "Classic")} game, like the host";
             else if (!Coop.InGame)
                 refuse = "host is not in a game";
             // Phase 3: a guest may join from ANY classic game (fresh or mid-game); its board is
@@ -561,8 +580,9 @@ namespace DRMultiplayer
                 sessionId = _sessionId,
                 playerId = id,
                 gameMode = (int)Mode,
-                restoreStackHeight = saved?.stackHeight ?? -1,   // < 0 = new player, keep fresh stack
-                restoreTopOfStack = saved?.topOfStack,
+                // < 0 = new player, keep fresh stack. Never restore into Creative's infinite stack.
+                restoreStackHeight = Coop.IsCreative ? -1 : saved?.stackHeight ?? -1,
+                restoreTopOfStack = Coop.IsCreative ? null : saved?.topOfStack,
                 snapshot = Coop.BuildSnapshot(),
             });
             BroadcastRoster();              // tell everyone (including the newcomer) the new roster
@@ -782,6 +802,46 @@ namespace DRMultiplayer
             CompareStamp(packet.sync, "remote placement");
         }
 
+        // ----- deleting placements (Creative) -----
+
+        /// <summary>Guest: called from the DestroyTile intercept when we use the delete tool.</summary>
+        internal static void RequestDelete(Vector2Int pos)
+        {
+            _host?.Send(new DeleteRequestPacket { x = pos.x, y = pos.y });
+        }
+
+        /// <summary>Host: our own delete tool removed a tile — tell everyone.</summary>
+        internal static void OnLocalHostDelete(Vector2Int pos)
+        {
+            if (Role != SessionRole.Host || !Active) return;
+            Broadcast(new TileDeletedPacket { origin = 0, x = pos.x, y = pos.y, sync = Coop.Stamp() });
+        }
+
+        private static void OnDeleteRequest(int gid, NetPeer peer, DeleteRequestPacket req)
+        {
+            if (!Coop.IsCreative) return;
+            if (Coop.DeleteAt(new Vector2Int(req.x, req.y)))
+            {
+                // Everyone applies it from the broadcast, the requester included.
+                Broadcast(new TileDeletedPacket { origin = gid, x = req.x, y = req.y, sync = Coop.Stamp() });
+                return;
+            }
+            // Nothing deletable there on our board, so theirs has drifted: send it again.
+            Info($"{GuestName(gid)} deleted a tile the host doesn't have — resyncing them.");
+            peer.Send(new ResyncPacket { snapshot = Coop.BuildSnapshot() });
+        }
+
+        private static void OnTileDeleted(TileDeletedPacket packet)
+        {
+            if (Role != SessionRole.Guest) return;
+            if (!Coop.DeleteAt(new Vector2Int(packet.x, packet.y)))
+            {
+                RequestResync("deleted tile was missing");
+                return;
+            }
+            CompareStamp(packet.sync, "remote deletion");
+        }
+
         // ----- desync handling -----
 
         private static void CompareStamp(SyncStamp remote, string context)
@@ -805,13 +865,14 @@ namespace DRMultiplayer
         private static void OnResyncRequest(NetPeer peer, ResyncRequestPacket req)
         {
             Info($"A guest requested a resync ({req.why}) — sending world.");
-            peer.Send(new ResyncPacket { snapshot = Coop.BuildSnapshot() });
+            peer.Send(new ResyncPacket { snapshot = Coop.BuildSnapshot(), rebuild = req.rebuild });
         }
 
         private static void OnResync(ResyncPacket packet)
         {
             if (Role != SessionRole.Guest) return;
-            Coop.ResyncWorld(packet.snapshot);
+            if (packet.rebuild) Coop.RebuildWorld(packet.snapshot);
+            else Coop.ResyncWorld(packet.snapshot);
             ResyncCount++;
             _consecutivePlaceRejects = 0;   // board is authoritative again — clear the reject streak
             Info($"World resynced from host ({packet.snapshot.tiles.Count} tiles).");
@@ -824,6 +885,7 @@ namespace DRMultiplayer
         {
             if (!Active) return;
             if (Mode == GameModeKind.Versus) { Info("Sending tiles is disabled in Versus."); return; }
+            if (Coop.IsCreative) { Info("Everyone has unlimited tiles in Creative."); return; }
             if (recipientId == LocalPlayerId) { Info("Pick another player to send to."); return; }
             if (Role == SessionRole.Guest && _pending2 != null) { Info("Wait for your placement to finish first."); return; }
             int removed = Coop.RemoveStackTiles(count);
@@ -1024,6 +1086,62 @@ namespace DRMultiplayer
                 : $"tie at {best} points between {string.Join(", ", winners)}.";
         }
 
+        // ---------------- Classic -> Creative switch ----------------
+
+        /// <summary>The game is about to reload into Creative (SceneLoader patch). Keep the session
+        /// alive through the reload instead of treating it as leaving the game.</summary>
+        internal static void BeginModeSwitch()
+        {
+            if (Role == SessionRole.Off) return;
+            _modeSwitchStartedAt = Time.realtimeSinceStartup;
+            _modeSwitchLeftScene = false;
+            Info("Switching to Creative — staying connected.");
+        }
+
+        /// <summary>Drives an in-progress mode switch. Returns true while the rest of Poll must
+        /// wait (old scene gone, new one not ready yet).</summary>
+        private static bool PollModeSwitch()
+        {
+            bool timedOut = Time.realtimeSinceStartup - _modeSwitchStartedAt > ModeSwitchTimeout;
+            if (!Coop.InGame)
+            {
+                _modeSwitchLeftScene = true;
+                if (!timedOut) return true;
+                _modeSwitchStartedAt = -1f;   // give up; Poll then ends the session as "left the game"
+                return false;
+            }
+            if (!_modeSwitchLeftScene)
+            {
+                // Still in the old scene: the reload hasn't started yet (or never will).
+                if (timedOut) _modeSwitchStartedAt = -1f;
+                return false;
+            }
+            if (Coop.Refs.Input != null && Coop.Refs.Input.IsLoading) return true;
+
+            _modeSwitchStartedAt = -1f;
+            _modeSwitchLeftScene = false;
+            if (Coop.IsCreative) Mode = GameModeKind.Coop;   // Versus can't continue without stacks
+            _pending2 = null;
+            _lastPreviewSig = null;
+            Coop.ClearAllPartnerPreviews();
+            if (Role == SessionRole.Host)
+            {
+                Info("Creative world loaded — sending it to everyone.");
+                Broadcast(new ResyncPacket { snapshot = Coop.BuildSnapshot(), rebuild = true });
+                BroadcastRoster();
+            }
+            else
+            {
+                // Our freshly loaded world is unrelated to the shared one: rebuild it from the host.
+                // Packets queued during the reload are applied first and may look like a desync,
+                // so hold off plain resync requests until this rebuild has landed.
+                Info("Creative world loaded — fetching the shared world from the host…");
+                _lastResyncRequest = Time.realtimeSinceStartup;
+                _host?.Send(new ResyncRequestPacket { why = "switched to Creative", rebuild = true });
+            }
+            return false;
+        }
+
         // ---------------- companion save & re-host (Phase 3) ----------------
 
         /// <summary>Host: on StartHost, load the companion file for the world we're about to host.
@@ -1122,6 +1240,7 @@ namespace DRMultiplayer
         internal static void Poll()
         {
             if (Role == SessionRole.Off) return;
+            if (_modeSwitchStartedAt >= 0f && PollModeSwitch()) return;
 
             // Leaving the game scene ends the session.
             if (!Coop.InGame)

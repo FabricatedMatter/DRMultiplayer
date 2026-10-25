@@ -27,7 +27,10 @@ namespace DRMultiplayer
         // v6: transport heartbeat/keepalive. A zero-length frame (4-byte length header of 0, no
         // payload) is now a valid transport-level keepalive — this changes framing semantics, so
         // both peers must run a matching mod build. The Hello handshake enforces the version match.
-        internal const int Current = 6;
+        // v7: Creative mode. Hello.gameMode may now be Creative (must match the host's mode); new
+        // DeleteRequest/TileDeleted packets sync the Creative delete tool; Resync(Request) carry a
+        // rebuild flag so a guest that just switched Classic -> Creative also adopts the world seeds.
+        internal const int Current = 7;
     }
 
     internal class Envelope
@@ -105,6 +108,23 @@ namespace DRMultiplayer
         public SyncStamp sync;     // host's state AFTER applying
     }
 
+    /// <summary>Guest -> host (Creative): "please delete the placed tile at x,y". The host deletes
+    /// it and broadcasts a TileDeletedPacket to everyone, the requester included.</summary>
+    internal class DeleteRequestPacket
+    {
+        public int x;
+        public int y;
+    }
+
+    /// <summary>Host -> all guests (Creative): the placed tile at x,y was deleted by <c>origin</c>.</summary>
+    internal class TileDeletedPacket
+    {
+        public int origin;         // playerId that deleted the tile (0 = host)
+        public int x;
+        public int y;
+        public SyncStamp sync;     // host's state AFTER deleting
+    }
+
     // ---------------- coop bookkeeping ----------------
 
     /// <summary>Guest -> host: my tile stack height changed. The host merges it into the roster
@@ -173,12 +193,14 @@ namespace DRMultiplayer
     internal class ResyncRequestPacket
     {
         public string why;
+        public bool rebuild;       // also re-adopt the world seeds (after a Classic -> Creative switch)
     }
 
     /// <summary>Host -> guest: authoritative world replacement (response to ResyncRequest).</summary>
     internal class ResyncPacket
     {
         public SnapshotDto snapshot;
+        public bool rebuild;       // wipe + rebuild incl. seeds, like a fresh join
     }
 
     // ---------------- data transfer objects ----------------
@@ -233,7 +255,7 @@ namespace DRMultiplayer
         public int consecutiveNoRotate;
         public int surroundedTiles;
 
-        // deterministic world generation (join only; ignored on resync)
+        // deterministic world generation (join + rebuild only; ignored on a plain resync)
         public int biomeSeed;
         public int preplacedSeed;
         public List<PreplacedDto> preplacedTiles;

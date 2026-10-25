@@ -22,6 +22,10 @@ namespace DRMultiplayer
     //    own solo autosave with the host's world.
     //  * RewardSystem.UpdateHighscore — a two-player score stays off the
     //    solo leaderboards.
+    //  * TilePlacer.DestroyTile — the Creative delete tool; host-ordered
+    //    like placements.
+    //  * SceneLoader.UnloadCurrentSceneAndLoad — "continue in Creative";
+    //    the session survives the reload.
     // =====================================================================
 
     [HarmonyPatch(typeof(TilePlacer), nameof(TilePlacer.PlaceCurrentTile))]
@@ -106,6 +110,65 @@ namespace DRMultiplayer
     internal static class HostCompanionSavePatch
     {
         private static void Postfix() => Session.OnHostAutosave();
+    }
+
+    /// <summary>Creative delete tool. The guest asks the host instead of deleting; the host
+    /// deletes normally and broadcasts it. Our own deletes (Coop.DeleteAt, world rebuilds)
+    /// pass straight through. The starting tiles never travel in snapshots, so they stay put.</summary>
+    [HarmonyPatch(typeof(TilePlacer), nameof(TilePlacer.DestroyTile))]
+    internal static class CreativeDeleteSyncPatch
+    {
+        private static bool Prefix(Tile tileToDestroy, out bool __state)
+        {
+            __state = false;
+            if (Coop.BypassDeleteIntercept || Session.Role == SessionRole.Off) return true;
+            if (!Session.Active || tileToDestroy == null) return false;
+            if (tileToDestroy.IsInitialTile)
+            {
+                Session.Info("The starting tiles can't be deleted in multiplayer.");
+                return false;
+            }
+            if (Session.Role == SessionRole.Guest)
+            {
+                Session.RequestDelete(tileToDestroy.GridPos);
+                return false;
+            }
+            __state = true;   // host: delete, then broadcast in the postfix
+            return true;
+        }
+
+        private static void Postfix(Tile tileToDestroy, bool __state)
+        {
+            if (__state) Session.OnLocalHostDelete(tileToDestroy.GridPos);
+        }
+    }
+
+    /// <summary>"Continue in Creative" reloads the scene; keep the session alive through it.</summary>
+    [HarmonyPatch(typeof(SceneLoader), nameof(SceneLoader.UnloadCurrentSceneAndLoad), new[] { typeof(GameMode) })]
+    internal static class KeepSessionOnCreativeSwitchPatch
+    {
+        private static void Prefix(GameMode gameModeToLoad)
+        {
+            if (gameModeToLoad != null && gameModeToLoad.id == GameModeId.Creative
+                && Coop.CurrentGameMode == GameModeId.Classic)
+                Session.BeginModeSwitch();
+        }
+    }
+
+    /// <summary>A guest never saves the shared world, so the game's "continue in Creative" would
+    /// convert the guest's OWN solo Classic save (deleting it). Start a fresh Creative game
+    /// instead; the host then sends the shared world into it.</summary>
+    [HarmonyPatch(typeof(SaveGameLoadingInitiator), nameof(SaveGameLoadingInitiator.InitiateTransferActiveGameToCreativeMode))]
+    internal static class GuestCreativeSwitchPatch
+    {
+        private static bool Prefix(SaveGameLoadingInitiator __instance)
+        {
+            if (Session.Role != SessionRole.Guest) return true;
+            var saves = Traverse.Create(__instance).Field("saveFileManager").GetValue<SaveFileManager>();
+            __instance.SetSelectedGameMode(saves.CreativeMode);
+            __instance.NewGameInSelectedGameMode();
+            return false;
+        }
     }
 
     [HarmonyPatch(typeof(RewardSystem), nameof(RewardSystem.UpdateHighscore))]

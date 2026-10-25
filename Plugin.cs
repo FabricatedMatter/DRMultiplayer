@@ -14,7 +14,7 @@ namespace DRMultiplayer
     public class Plugin : BaseUnityPlugin
     {
         public const string Guid = "fabricatedmatter.drmultiplayer";
-        public const string Version = "0.1.0";
+        public const string Version = "0.1.1";
         internal static ManualLogSource Log;
 
         // Sentinel meaning "no explicit name configured" — an empty PlayerName in
@@ -145,6 +145,15 @@ namespace DRMultiplayer
             Log.LogInfo($"DRMultiplayer v{Version} ready — {_overlayKey.Value} (or {_overlayKeyAlt.Value}) opens the multiplayer window.");
         }
 
+        // Start runs after every plugin's Awake, so all plugins are registered by now.
+        private void Start()
+        {
+            // Creative is built in since 0.1.1; the old companion bridge rewrites the handshake
+            // and breaks Creative joins, so tell the player to remove it.
+            if (BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey("christianreese.drmultiplayer.creativebridge"))
+                Session.Info("Creative Coop Bridge detected: Creative is built in now, please uninstall the bridge.");
+        }
+
         private void Update()
         {
             if (!s_updateAlive) { s_updateAlive = true; Log.LogInfo("Update loop alive"); }
@@ -163,7 +172,8 @@ namespace DRMultiplayer
             // everything that touches the game happens here, on the main thread.
             try
             {
-                while (NetHub.Events.TryDequeue(out var ev))
+                // During a Classic -> Creative reload, packets wait until the new world is up.
+                while (!Session.HoldingForModeSwitch && NetHub.Events.TryDequeue(out var ev))
                     Session.HandleEvent(ev);
                 Session.Poll();
             }
@@ -256,6 +266,7 @@ namespace DRMultiplayer
             s_overlayRect = _overlayRect;
 
             string modeLabel = Session.Role == SessionRole.Off ? "Multiplayer"
+                : Coop.IsCreative ? "Creative Coop"
                 : Session.Mode == GameModeKind.Versus ? "Versus" : "Coop";
             GUI.Box(_overlayRect, $"Dorfromantik Multiplayer v{Version} — {modeLabel}");
             GUILayout.BeginArea(new Rect(_overlayRect.x + 12, _overlayRect.y + 34,
@@ -282,7 +293,7 @@ namespace DRMultiplayer
         {
             if (!Coop.InGame)
             {
-                GUILayout.Label("Start a normal (classic) game first, then host or join from here.", _labelStyle);
+                GUILayout.Label("Start a Classic or Creative game first, then host or join from here.", _labelStyle);
                 DrawMessages();
                 return;
             }
@@ -310,16 +321,23 @@ namespace DRMultiplayer
             var joinBlocker = Session.JoinBlocker();
 
             GUILayout.Label("<b>Host a game</b>", _labelStyle);
-            // Mode toggle — chosen BEFORE hosting. Coop = shared world + shared score, everyone plays
-            // at once. Versus = alternating turns, individual scores, highest score wins.
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("Mode:", _labelStyle, GUILayout.Width(70));
-            if (GUILayout.Button(_hostMode == GameModeKind.Versus ? "Versus  ▸" : "Coop  ▸", GUILayout.Width(180)))
-                _hostMode = _hostMode == GameModeKind.Coop ? GameModeKind.Versus : GameModeKind.Coop;
-            GUILayout.EndHorizontal();
-            GUILayout.Label(_hostMode == GameModeKind.Versus
-                ? "<color=#cccccc>Versus: players take turns; each scores individually; highest score wins.</color>"
-                : "<color=#cccccc>Coop: one shared world and score; everyone plays at once.</color>", _smallStyle);
+            if (Coop.IsCreative)
+            {
+                GUILayout.Label("<color=#cccccc>Creative: one shared world, unlimited tiles, everyone builds at once. Guests must be in Creative too.</color>", _smallStyle);
+            }
+            else
+            {
+                // Mode toggle — chosen BEFORE hosting. Coop = shared world + shared score, everyone plays
+                // at once. Versus = alternating turns, individual scores, highest score wins.
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Mode:", _labelStyle, GUILayout.Width(70));
+                if (GUILayout.Button(_hostMode == GameModeKind.Versus ? "Versus  ▸" : "Coop  ▸", GUILayout.Width(180)))
+                    _hostMode = _hostMode == GameModeKind.Coop ? GameModeKind.Versus : GameModeKind.Coop;
+                GUILayout.EndHorizontal();
+                GUILayout.Label(_hostMode == GameModeKind.Versus
+                    ? "<color=#cccccc>Versus: players take turns; each scores individually; highest score wins.</color>"
+                    : "<color=#cccccc>Coop: one shared world and score; everyone plays at once.</color>", _smallStyle);
+            }
             GUILayout.BeginHorizontal();
             GUILayout.Label("Port:", _labelStyle, GUILayout.Width(70));
             _hostPortText = GUILayout.TextField(_hostPortText, 5, GUILayout.Width(110));
@@ -343,7 +361,7 @@ namespace DRMultiplayer
                 GUILayout.Label("<color=#cccccc>No LAN address detected — you can still host, but joiners must reach this machine by IP.</color>", _smallStyle);
 
             GUILayout.Label(" ", _smallStyle);
-            GUILayout.Label("<b>Join a coop game</b>", _labelStyle);
+            GUILayout.Label("<b>Join a game</b>", _labelStyle);
             GUILayout.BeginHorizontal();
             GUILayout.Label("IP:", _labelStyle, GUILayout.Width(70));
             _joinAddressText = GUILayout.TextField(_joinAddressText, 45, GUILayout.Width(220));
@@ -397,7 +415,7 @@ namespace DRMultiplayer
             }
             else
             {
-                GUILayout.Label($"<b>Coop</b> — {players.Count} player{(players.Count == 1 ? "" : "s")}  ({role})", _labelStyle);
+                GUILayout.Label($"<b>{(Coop.IsCreative ? "Creative Coop" : "Coop")}</b> — {players.Count} player{(players.Count == 1 ? "" : "s")}  ({role})", _labelStyle);
             }
             if (Session.Role == SessionRole.Host && Session.ContinuingSaved)
                 GUILayout.Label("<color=#88ddaa>Continuing a saved multiplayer game — returning players get their saved tiles back.</color>", _smallStyle);
@@ -423,11 +441,12 @@ namespace DRMultiplayer
             if (refs != null)
                 GUILayout.Label($"<b>{(versus ? "Total score" : "Shared score")}:</b> {refs.Rewards.Score}      <b>Tiles placed:</b> {Coop.PlacedTileCount()}"
                                 + (Session.ResyncCount > 0 ? $"      resyncs: {Session.ResyncCount}" : ""), _smallStyle);
-            if (!versus && Session.MyTiles == 0 && !Session.AllStacksEmpty())
+            if (!versus && !Coop.IsCreative && Session.MyTiles == 0 && !Session.AllStacksEmpty())
                 GUILayout.Label("<color=#ffaa55>You're out of tiles! Ask another player to send you some.</color>", _labelStyle);
 
-            // Gifting is Coop-only (it doesn't fit alternating individual play).
-            if (versus)
+            // Gifting is Coop-only (it doesn't fit alternating individual play), and pointless with
+            // Creative's unlimited stacks.
+            if (versus || Coop.IsCreative)
             {
                 GUILayout.Label(" ", _smallStyle);
                 if (GUILayout.Button(Session.Role == SessionRole.Host ? "Stop hosting" : "Disconnect"))
@@ -513,7 +532,7 @@ namespace DRMultiplayer
             }
             string header = versus
                 ? $"Versus — {Session.PlayerName(Session.ActivePlayerId)}'s turn  ({_overlayKey.Value} = menu)"
-                : $"Coop — {players.Count} players  ({_overlayKey.Value} = menu)";
+                : $"{(Coop.IsCreative ? "Creative Coop" : "Coop")} — {players.Count} players  ({_overlayKey.Value} = menu)";
             var rect = new Rect(Screen.width - 420, 8, 412, 54);
             GUI.Box(rect, "");
             GUI.Label(new Rect(rect.x + 10, rect.y + 4, rect.width - 20, 24),
@@ -522,7 +541,7 @@ namespace DRMultiplayer
                 new GUIContent(sb.ToString()), _smallStyle);
         }
 
-        private static string Num(int v) => v < 0 ? "?" : v.ToString();
+        private static string Num(int v) => Coop.IsCreative ? "∞" : v < 0 ? "?" : v.ToString();
 
         private void BumpSendCount(int delta)
         {
